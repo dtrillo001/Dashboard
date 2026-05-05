@@ -1,0 +1,213 @@
+requirements.txt
+streamlit
+pandas
+numpy
+yfinance
+
+app.py
+import streamlit as st
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from datetime import timezone
+
+st.set_page_config(page_title="Live Portfolio Update", layout="wide")
+
+---- Portfolio (edit here if needed) ----
+COMMON = [
+    ("AMD", 1500), ("ORCL", 958), ("ADBE", 430), ("META", 100), ("RIVN", 2500),
+    ("FNMA", 5080), ("AMZN", 100), ("NFLX", 225), ("FMCC", 1000),
+    ("ACHR", 1000), ("WWR", 8250), ("PYPL", 75),
+]
+FUNDS = [
+    ("NEAIX", 1285), ("SEEGX", 1075.7), ("BFGIX", 1299), ("QILGX", 1678), ("ANWFX", 823), ("PIPNX", 3423),
+]
+TRUSTS = [
+    ("Vanguard Target Retirement 2050 Trust", 5083, 86.41),
+    ("UC Pathway Fund 2050", 7104, 48.03),
+]
+CASH_ACCOUNTS = [
+    ("Account 1", 94000.0),
+    ("Account 2", 100000.0),
+    ("Account 3", 340000.0),
+    ("Account 4", 440000.0),
+]
+
+CATEGORIES = ["Common Stocks", "Mutual Funds", "Retirement Trusts", "Cash"]
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_history(tickers):
+    if not tickers:
+        return pd.DataFrame()
+    hist = yf.download(tickers, period="5y", interval="1d", auto_adjust=True, progress=False, threads=True)
+    if isinstance(hist.columns, pd.MultiIndex):
+        close = hist["Close"]
+    else:
+        close = hist[["Close"]]
+        close.columns = [tickers[0]]
+    return close.dropna(how="all")
+
+def anchored_return(series, anchor_date):
+    try:
+        if series.index.tz is None:
+            series = series.tz_localize("UTC")
+        idx = series.index[series.index.get_loc(anchor_date, method="pad")] if series.index.min() <= anchor_date else series.index.min()
+        base = float(series.loc[idx])
+        last = float(series.iloc[-1])
+        return (last / base - 1.0) if base else np.nan
+    except Exception:
+        return np.nan
+
+def weighted_avg(values, weights):
+    v = pd.Series(values, dtype="float64")
+    w = pd.Series(weights, dtype="float64")
+    m = (~v.isna()) & (w > 0)
+    if not m.any():
+        return np.nan
+    return float((v[m] * w[m]).sum() / w[m].sum())
+
+def build_rows():
+    stock_tickers = [t for t, _ in COMMON]
+    fund_tickers = [t for t, _ in FUNDS]
+    all_tickers = list(dict.fromkeys(stock_tickers + fund_tickers))
+    close = fetch_history(all_tickers)
+
+text
+
+Collapse
+
+
+ Copy
+
+today = pd.Timestamp.now(tz=timezone.utc).normalize()
+ystart = pd.Timestamp(year=today.year, month=1, day=1, tz=timezone.utc)
+one_year_ago = today - pd.DateOffset(years=1)
+five_years_ago = today - pd.DateOffset(years=5)
+
+latest, prev, ytd, y1, y5 = {}, {}, {}, {}, {}
+
+for t in all_tickers:
+    s = close.get(t)
+    if s is None:
+        continue
+    s = s.dropna()
+    if s.empty:
+        continue
+    latest[t] = float(s.iloc[-1])
+    prev[t] = float(s.iloc[-2]) if len(s) >= 2 else float(s.iloc[-1])
+    ytd[t] = anchored_return(s, ystart)
+    y1[t] = anchored_return(s, one_year_ago)
+    y5[t] = anchored_return(s, five_years_ago)
+
+def as_row(category, ticker, price, prev_close, shares, p_ytd, p_1y, p_5y):
+    price_diff = (price - prev_close) if (price is not None and prev_close is not None) else np.nan
+    total = (price * shares) if (price is not None and shares is not None) else 0.0
+    day_perf = (price / prev_close - 1.0) if (price and prev_close and prev_close != 0) else np.nan
+    return dict(
+        Category=category,
+        **{"Ticker/Account": ticker},
+        **{"Current Price": price},
+        **{"Prev Close": prev_close},
+        **{"Price Diff ($)": price_diff},
+        Shares=shares,
+        **{"Total Value (Price × Shares)": total},
+        **{"1-Day Perf (%)": day_perf},
+        **{"YTD Perf (%)": p_ytd},
+        **{"1-Year Perf (%)": p_1y},
+        **{"5-Year Perf (%)": p_5y},
+    )
+
+rows = []
+
+for t, sh in COMMON:
+    p = latest.get(t)
+    pc = prev.get(t)
+    rows.append(as_row("Common Stocks", t, p, pc, sh, ytd.get(t), y1.get(t), y5.get(t)))
+
+for t, sh in FUNDS:
+    p = latest.get(t)
+    pc = prev.get(t)
+    rows.append(as_row("Mutual Funds", t, p, pc, sh, ytd.get(t), y1.get(t), y5.get(t)))
+
+for name, sh, manual_price in TRUSTS:
+    rows.append(as_row("Retirement Trusts", name, manual_price, manual_price, sh, np.nan, np.nan, np.nan))
+
+for acct, amount in CASH_ACCOUNTS:
+    rows.append(as_row("Cash", acct, 1.0, 1.0, amount, 0.0, 0.0, 0.0))
+
+df = pd.DataFrame(rows)
+
+# Subtotals
+out = []
+for cat in CATEGORIES:
+    sub = df[df["Category"] == cat].copy()
+    w = sub["Total Value (Price × Shares)"].fillna(0)
+    ytd_w = weighted_avg(sub["YTD Perf (%)"], w)
+    y1_w = weighted_avg(sub["1-Year Perf (%)"], w)
+    y5_w = weighted_avg(sub["5-Year Perf (%)"], w)
+    out.append(sub)
+    out.append(pd.DataFrame([{
+        "Category": cat,
+        "Ticker/Account": "Subtotal",
+        "Current Price": np.nan,
+        "Prev Close": np.nan,
+        "Price Diff ($)": np.nan,
+        "Shares": np.nan,
+        "Total Value (Price × Shares)": float(w.sum()),
+        "1-Day Perf (%)": np.nan,
+        "YTD Perf (%)": ytd_w,
+        "1-Year Perf (%)": y1_w,
+        "5-Year Perf (%)": y5_w,
+    }]))
+final_df = pd.concat(out, ignore_index=True)
+
+# Aggregated total
+body = final_df[final_df["Ticker/Account"] != "Subtotal"]
+w_all = body["Total Value (Price × Shares)"].fillna(0)
+agg = {
+    "Category": "TOTAL",
+    "Ticker/Account": "Portfolio",
+    "Current Price": np.nan,
+    "Prev Close": np.nan,
+    "Price Diff ($)": np.nan,
+    "Shares": np.nan,
+    "Total Value (Price × Shares)": float(w_all.sum()),
+    "1-Day Perf (%)": np.nan,
+    "YTD Perf (%)": weighted_avg(body["YTD Perf (%)"], w_all),
+    "1-Year Perf (%)": weighted_avg(body["1-Year Perf (%)"], w_all),
+    "5-Year Perf (%)": weighted_avg(body["5-Year Perf (%)"], w_all),
+}
+final_df = pd.concat([final_df, pd.DataFrame([agg])], ignore_index=True)
+return final_df
+def fmt_money(v):
+    return "" if pd.isna(v) else f"${float(v):,.2f}"
+
+def fmt_shares(v):
+    return "" if pd.isna(v) else f"{float(v):,.4f}".rstrip("0").rstrip(".")
+
+def fmt_pct(v):
+    if pd.isna(v): return "N/A"
+    return f"{float(v)*100:,.2f}%"
+
+st.title("Live Market Update (Single Markdown Table)")
+st.caption("Stocks/funds via Yahoo Finance; Retirement Trusts use manual prices (performance N/A). Cash assumed 0% performance.")
+
+if st.button("Refresh data"):
+    st.cache_data.clear()
+
+df = build_rows()
+
+disp = df.copy()
+for c in ["Current Price","Prev Close","Price Diff ($)"]:
+    disp[c] = disp[c].apply(fmt_money)
+disp["Shares"] = disp["Shares"].apply(fmt_shares)
+disp["Total Value (Price × Shares)"] = disp["Total Value (Price × Shares)"].apply(fmt_money)
+for c in ["1-Day Perf (%)","YTD Perf (%)","1-Year Perf (%)","5-Year Perf (%)"]:
+    disp[c] = disp[c].apply(fmt_pct)
+
+order = ["Category","Ticker/Account","Current Price","Prev Close","Price Diff ($)","Shares","Total Value (Price × Shares)","1-Day Perf (%)","YTD Perf (%)","1-Year Perf (%)","5-Year Perf (%)"]
+disp = disp[order]
+
+md = disp.to_markdown(index=False)
+st.markdown(md)
+
