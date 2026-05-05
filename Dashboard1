@@ -1,14 +1,1 @@
-requirements.txt
-streamlit
-pandas
-numpy
-yfinance
 
-app.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-import yfinance as yf
-from datetime import timezone
-
-st.set_page_config(page_title="Live Portfolio Update", layout="wide")
